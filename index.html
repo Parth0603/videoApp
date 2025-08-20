@@ -97,7 +97,8 @@
         // Create a new room and redirect
         createRoomBtn.addEventListener('click', () => {
             const newRoomId = uuid.v4();
-            window.location.href = `/${newRoomId}`;
+            // Use the public server URL for redirection
+            window.location.href = `https://videoapp-au2s.onrender.com/${newRoomId}`;
         });
         
         // Copy the current room link to clipboard
@@ -122,7 +123,10 @@
         }
 
         function startVideoChat() {
-            const socket = io('/');
+            // *** THIS IS THE IMPORTANT CHANGE ***
+            // Connect to your deployed Render server
+            const socket = io('https://videoapp-au2s.onrender.com');
+            
             const videoGrid = document.getElementById('video-grid');
             const myVideo = document.createElement('video');
             myVideo.muted = true;
