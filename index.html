@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Chat</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Socket.IO client library -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <!-- UUID library for generating unique room IDs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/uuid/8.3.2/uuid.min.js"></script>
+    <style>
+        /* Custom styles for a cleaner look */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        #video-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 1rem;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 0.5rem;
+            transform: scaleX(-1); /* Mirror effect for camera */
+        }
+        video.screen-share {
+             transform: scaleX(1); /* Don't mirror screen share */
+        }
+        .video-container {
+            position: relative;
+            background-color: #2d3748;
+            border-radius: 0.5rem;
+            overflow: hidden;
+        }
+        .user-label {
+            position: absolute;
+            bottom: 8px;
+            left: 8px;
+            background-color: rgba(0, 0, 0, 0.5);
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.875rem;
+        }
+        /* Hide elements by default */
+        #room-screen { display: none; }
+    </style>
+</head>
+<body class="bg-gray-900 text-white flex flex-col min-h-screen">
+
+    <!-- Home Screen: Create or Join a Room -->
+    <div id="home-screen" class="flex flex-col items-center justify-center min-h-screen">
+        <div class="bg-gray-800 p-8 rounded-lg shadow-xl text-center">
+            <h1 class="text-4xl font-bold mb-6">Video Chat</h1>
+            <p class="text-gray-400 mb-8">Create a room and share the link to start chatting.</p>
+            <button id="create-room-btn" class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 px-6 rounded-lg transition-colors w-full">
+                Create New Room
+            </button>
+        </div>
+    </div>
+
+    <!-- Room Screen: The actual video chat -->
+    <div id="room-screen" class="flex flex-col min-h-screen">
+        <!-- Header -->
+        <header class="bg-gray-800 shadow-md p-4 flex justify-between items-center">
+            <h1 class="text-xl font-bold">Video Chat Room</h1>
+            <button id="copy-link-btn" class="bg-gray-700 hover:bg-gray-600 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                Copy Invite Link
+            </button>
+        </header>
+
+        <!-- Main Content -->
+        <main class="flex-grow p-4 md:p-6">
+            <div id="video-grid" class="w-full h-full"></div>
+        </main>
+
+        <!-- Controls Footer -->
+        <footer class="bg-gray-800 p-4 flex justify-center items-center space-x-4">
+            <button id="mute-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full transition-colors">Mute</button>
+            <button id="video-btn" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-full transition-colors">Stop Video</button>
+            <button id="screen-share-btn" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-full transition-colors">Share Screen</button>
+        </footer>
+    </div>
+
+    <script>
+        const homeScreen = document.getElementById('home-screen');
+        const roomScreen = document.getElementById('room-screen');
+        const createRoomBtn = document.getElementById('create-room-btn');
+        const copyLinkBtn = document.getElementById('copy-link-btn');
+
+        // --- Navigation Logic ---
+
+        // Create a new room and redirect
+        createRoomBtn.addEventListener('click', () => {
+            const newRoomId = uuid.v4();
+            window.location.href = `/${newRoomId}`;
+        });
+        
+        // Copy the current room link to clipboard
+        copyLinkBtn.addEventListener('click', () => {
+            navigator.clipboard.writeText(window.location.href).then(() => {
+                copyLinkBtn.textContent = 'Copied!';
+                setTimeout(() => { copyLinkBtn.textContent = 'Copy Invite Link'; }, 2000);
+            });
+        });
+
+        const ROOM_ID = window.location.pathname.substring(1);
+
+        // If there's no room ID in the URL, show the home screen
+        if (!ROOM_ID) {
+            homeScreen.style.display = 'flex';
+            roomScreen.style.display = 'none';
+        } else {
+            // If there is a room ID, show the chat room and start the connection
+            homeScreen.style.display = 'none';
+            roomScreen.style.display = 'flex';
+            startVideoChat();
+        }
+
+        function startVideoChat() {
+            const socket = io('/');
+            const videoGrid = document.getElementById('video-grid');
+            const myVideo = document.createElement('video');
+            myVideo.muted = true;
+
+            const peers = {};
+            let myVideoStream;
+            let screenStream;
+            let isScreenSharing = false;
+
+            // Get user's camera and microphone access
+            navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: true
+            }).then(stream => {
+                myVideoStream = stream;
+                addVideoStream(myVideo, stream, 'You');
+                
+                socket.on('user-connected', userId => {
+                    console.log('User connected:', userId);
+                    setTimeout(() => connectToNewUser(userId, myVideoStream), 1000);
+                });
+
+            }).catch(err => {
+                console.error("Failed to get local stream", err);
+                // Handle error with a non-blocking message
+            });
+
+            // --- Main Socket and WebRTC Logic ---
+            
+            socket.on('connect', () => socket.emit('join-room', ROOM_ID));
+
+            socket.on('user-disconnected', userId => {
+                if (peers[userId]) peers[userId].close();
+                const videoToRemove = document.getElementById(`video-${userId}`);
+                if (videoToRemove) videoToRemove.remove();
+            });
+
+            socket.on('offer', (userId, offer) => {
+                const peer = createPeerConnection(userId);
+                peer.setRemoteDescription(new RTCSessionDescription(offer));
+                
+                const streamToUse = isScreenSharing ? screenStream : myVideoStream;
+                streamToUse.getTracks().forEach(track => peer.addTrack(track, streamToUse));
+
+                peer.createAnswer().then(answer => {
+                    peer.setLocalDescription(answer);
+                    socket.emit('answer', userId, answer);
+                });
+            });
+
+            socket.on('answer', (userId, answer) => {
+                if (peers[userId]) peers[userId].setRemoteDescription(new RTCSessionDescription(answer));
+            });
+
+            socket.on('ice-candidate', (userId, candidate) => {
+                if (peers[userId]) peers[userId].addIceCandidate(new RTCIceCandidate(candidate));
+            });
+
+            function connectToNewUser(userId, stream) {
+                const peer = createPeerConnection(userId);
+                stream.getTracks().forEach(track => peer.addTrack(track, stream));
+                peer.createOffer().then(offer => {
+                    peer.setLocalDescription(offer);
+                    socket.emit('offer', userId, offer);
+                });
+            }
+
+            function createPeerConnection(userId) {
+                const peer = new RTCPeerConnection({
+                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                });
+                peers[userId] = peer;
+
+                peer.ontrack = event => {
+                    const videoContainer = document.getElementById(`video-${userId}`);
+                    if (!videoContainer) {
+                        const remoteVideo = document.createElement('video');
+                        addVideoStream(remoteVideo, event.streams[0], `User: ${userId.substring(0, 5)}`, userId);
+                    }
+                };
+                
+                peer.onicecandidate = event => {
+                    if (event.candidate) socket.emit('ice-candidate', userId, event.candidate);
+                };
+                
+                return peer;
+            }
+
+            function addVideoStream(video, stream, label, userId = null) {
+                video.srcObject = stream;
+                video.addEventListener('loadedmetadata', () => video.play());
+                const container = document.createElement('div');
+                container.classList.add('video-container');
+                if (userId) container.id = `video-${userId}`;
+                const userLabel = document.createElement('div');
+                userLabel.classList.add('user-label');
+                userLabel.innerText = label;
+                container.append(video, userLabel);
+                videoGrid.append(container);
+            }
+
+            // --- Screen Sharing Logic ---
+            const screenShareBtn = document.getElementById('screen-share-btn');
+
+            screenShareBtn.addEventListener('click', () => {
+                if (isScreenSharing) {
+                    stopScreenShare();
+                } else {
+                    startScreenShare();
+                }
+            });
+
+            function startScreenShare() {
+                navigator.mediaDevices.getDisplayMedia({ video: true }).then(stream => {
+                    isScreenSharing = true;
+                    screenStream = stream;
+                    const screenTrack = screenStream.getVideoTracks()[0];
+                    
+                    // Replace the video track for all connected peers
+                    Object.values(peers).forEach(peer => {
+                        const sender = peer.getSenders().find(s => s.track.kind === 'video');
+                        if(sender) sender.replaceTrack(screenTrack);
+                    });
+
+                    // Update local video element to show the screen share
+                    myVideo.srcObject = screenStream;
+                    myVideo.classList.add('screen-share');
+
+                    // Listen for when the user stops sharing via the browser's UI
+                    screenTrack.onended = () => stopScreenShare();
+
+                    screenShareBtn.textContent = 'Stop Sharing';
+                    screenShareBtn.classList.replace('bg-green-600', 'bg-red-600');
+                    screenShareBtn.classList.replace('hover:bg-green-700', 'hover:bg-red-700');
+                }).catch(err => console.error('Screen share error:', err));
+            }
+
+            function stopScreenShare() {
+                if (!isScreenSharing) return;
+                isScreenSharing = false;
+                const cameraTrack = myVideoStream.getVideoTracks()[0];
+
+                // Replace the screen track with the camera track for all peers
+                Object.values(peers).forEach(peer => {
+                    const sender = peer.getSenders().find(s => s.track.kind === 'video');
+                    if(sender) sender.replaceTrack(cameraTrack);
+                });
+
+                // Stop the screen share stream
+                screenStream.getTracks().forEach(track => track.stop());
+                screenStream = null;
+
+                // Update local video back to the camera
+                myVideo.srcObject = myVideoStream;
+                myVideo.classList.remove('screen-share');
+
+                screenShareBtn.textContent = 'Share Screen';
+                screenShareBtn.classList.replace('bg-red-600', 'bg-green-600');
+                screenShareBtn.classList.replace('hover:bg-red-700', 'hover:bg-green-700');
+            }
+
+
+            // --- Control Button Logic ---
+            const muteBtn = document.getElementById('mute-btn');
+            const videoBtn = document.getElementById('video-btn');
+
+            muteBtn.addEventListener('click', () => {
+                if (!myVideoStream) return;
+                const enabled = myVideoStream.getAudioTracks()[0].enabled;
+                myVideoStream.getAudioTracks()[0].enabled = !enabled;
+                muteBtn.textContent = enabled ? 'Unmute' : 'Mute';
+                muteBtn.classList.toggle('bg-red-600', enabled);
+            });
+
+            videoBtn.addEventListener('click', () => {
+                if (!myVideoStream) return;
+                const enabled = myVideoStream.getVideoTracks()[0].enabled;
+                myVideoStream.getVideoTracks()[0].enabled = !enabled;
+                videoBtn.textContent = enabled ? 'Start Video' : 'Stop Video';
+                videoBtn.classList.toggle('bg-red-600', enabled);
+            });
+        }
+    </script>
+</body>
+</html>
